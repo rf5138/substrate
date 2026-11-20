@@ -51,6 +51,8 @@ func main() {
 	fstype := flag.String("fstype", "ext4", "rootfs filesystem type")
 	cid := flag.String("cid", "ctr0", "container id")
 	cmd := flag.String("cmd", "echo hello from firecracker; head -2 /etc/os-release; mount | grep ' / '; echo written > /probe && cat /probe", "shell command to run")
+	detach := flag.Bool("detach", false, "return once the container has started instead of waiting for it")
+	statsOnly := flag.Bool("stats", false, "only query an existing container's stats (e.g. after a restore)")
 	flag.Parse()
 	if *vsock == "" {
 		log.Fatal("-vsock is required")
@@ -67,6 +69,16 @@ func main() {
 	}
 	defer ac.Close()
 	step("dial")
+
+	if *statsOnly {
+		st, err := ac.StatsContainer(ctx, *cid)
+		if err != nil {
+			log.Fatal(err)
+		}
+		step("stats")
+		log.Printf("container %s: pids=%d memory=%d bytes", *cid, st.GetPidsStats().GetCurrent(), st.GetMemoryStats().GetUsage().GetUsage())
+		return
+	}
 
 	if err := ac.CreateSandbox(ctx, &agentpb.CreateSandboxRequest{Hostname: "actor", SandboxId: "fcpoc"}); err != nil {
 		log.Fatal(err)
@@ -99,6 +111,9 @@ func main() {
 		log.Fatal(err)
 	}
 	step("start-container")
+	if *detach {
+		return
+	}
 
 	var wg sync.WaitGroup
 	for _, stderr := range []bool{false, true} {
