@@ -38,6 +38,13 @@ import (
 // Guest path kata uses for a block-device container rootfs.
 const guestRootfsFmt = "/run/kata-containers/shared/containers/%s/rootfs"
 
+// containerd's default capability set.
+var defaultCaps = []string{
+	"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD", "CAP_NET_RAW",
+	"CAP_SETGID", "CAP_SETUID", "CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE",
+	"CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE",
+}
+
 func main() {
 	vsock := flag.String("vsock", "", "Firecracker hybrid-vsock socket (vsock.uds_path)")
 	dev := flag.String("dev", "/dev/vda", "guest block device holding the container rootfs")
@@ -124,6 +131,11 @@ func containerSpec(cmd string) *specs.Spec {
 			Args: []string{"/bin/sh", "-c", cmd},
 			Env:  []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
 			Cwd:  "/",
+			Capabilities: &specs.LinuxCapabilities{
+				Bounding:  defaultCaps,
+				Effective: defaultCaps,
+				Permitted: defaultCaps,
+			},
 		},
 		Hostname: "actor",
 		Mounts: []specs.Mount{
