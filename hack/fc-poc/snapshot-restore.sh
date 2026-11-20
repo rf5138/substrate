@@ -18,6 +18,7 @@ guest() {
 COUNTER='echo counter=$(cat /run/kata-containers/ctr0/rootfs/counter) guest_epoch=$(date +%s)'
 
 echo "=== boot source VM and start a long-running container"
+echo "host clocksource: $(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)"
 "$HERE/boot-kata-guest.sh" vm-snap "$DIR/alpine.ext4"
 "$DIR/fcpoc" -vsock "$SRC/kata.hvsock" -detach \
   -cmd 'i=0; while true; do i=$((i+1)); echo $i > /counter; sleep 0.2; done'
@@ -28,16 +29,18 @@ echo "=== pause and take a full snapshot"
 rm -rf "$SNAP" && mkdir -p "$SNAP"
 t=$(now_ms); api "$SRC" PATCH /vm '{"state":"Paused"}'; echo "pause $(( $(now_ms) - t )) ms"
 t=$(now_ms)
-api "$SRC" PUT /snapshot/create "{\"snapshot_type\":\"Full\",\"snapshot_path\":\"$SNAP/vmstate\",\"mem_file_path\":\"$SNAP/mem\"}"
-echo "snapshot-create $(( $(now_ms) - t )) ms"
+api "$SRC" PUT /snapshot/create "{\"snapshot_type\":\"Full\",\"snapshot_path\":\"$SNAP/vmstate\",\"mem_file_path\":\"$SNAP/mem\",\"sync_snapshot_files\":${SYNC:-false}}"
+echo "snapshot-create $(( $(now_ms) - t )) ms (sync_snapshot_files=${SYNC:-false})"
 ls -ls "$SNAP"
 cp --sparse=always "$SRC/ctr0.ext4" "$SNAP/ctr0.ext4"
 kill "$(cat "$SRC/fc.pid")"; echo "source VM killed; waiting ${GAP}s before restore"
 sleep "$GAP"
 
-echo "=== restore into a new Firecracker process at new paths"
+echo "=== restore into a new Firecracker process"
+# v1.18 has no drive_overrides (only on Firecracker main), so the block device
+# must come back at the path recorded in the snapshot.
 rm -rf "$DST" && mkdir -p "$DST"
-cp --sparse=always "$SNAP/ctr0.ext4" "$DST/ctr0.ext4"
+cp --sparse=always "$SNAP/ctr0.ext4" "$SRC/ctr0.ext4"
 T0=$(now_ms)
 "$DIR/firecracker" --api-sock "$DST/api.sock" > "$DST/console.log" 2>&1 &
 echo $! > "$DST/fc.pid"
@@ -46,7 +49,6 @@ t=$(now_ms)
 api "$DST" PUT /snapshot/load "{
   \"snapshot_path\": \"$SNAP/vmstate\",
   \"mem_backend\": {\"backend_type\": \"File\", \"backend_path\": \"$SNAP/mem\"},
-  \"drive_overrides\": [{\"drive_id\": \"ctr0\", \"path_on_host\": \"$DST/ctr0.ext4\"}],
   \"vsock_override\": {\"uds_path\": \"$DST/kata.hvsock\"},
   \"resume_vm\": true
 }"
