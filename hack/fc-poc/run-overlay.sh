@@ -26,7 +26,8 @@ sleep 1
 echo "=== host view of each upper (what a ROOTFS checkpoint would read)"
 for vm in vm-a vm-b; do
   m=$(mktemp -d)
-  mount -o loop,ro "$DIR/run/$vm/upper.ext4" "$m"
+  # noload: the guest was killed without unmounting, so skip journal replay on this read-only look.
+  mount -o loop,ro,noload "$DIR/run/$vm/upper.ext4" "$m"
   echo "--- $vm upper: $(du -h --apparent-size "$DIR/run/$vm/upper.ext4" | cut -f1) apparent, $(du -h "$DIR/run/$vm/upper.ext4" | cut -f1) on disk"
   (cd "$m/upper" && find . -mindepth 1 -printf '%M %y %p\n' | sort)
   echo "probe=$(cat "$m/upper/probe")"
