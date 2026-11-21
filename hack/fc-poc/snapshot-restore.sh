@@ -50,9 +50,10 @@ api "$DST" PUT /snapshot/load "{
   \"snapshot_path\": \"$SNAP/vmstate\",
   \"mem_backend\": {\"backend_type\": \"File\", \"backend_path\": \"$SNAP/mem\"},
   \"vsock_override\": {\"uds_path\": \"$DST/kata.hvsock\"},
+  \"clock_realtime\": ${CLOCK_REALTIME:-true},
   \"resume_vm\": true
 }"
-echo "snapshot-load $(( $(now_ms) - t )) ms"
+echo "snapshot-load $(( $(now_ms) - t )) ms (clock_realtime=${CLOCK_REALTIME:-true})"
 for i in $(seq 1 200); do
   reply=$(printf 'CONNECT 1024\n' | timeout 1 socat -t1 - UNIX-CONNECT:"$DST/kata.hvsock" 2>/dev/null | head -1 || true)
   [[ "$reply" == OK* ]] && { echo "kata-agent reachable $(( $(now_ms) - T0 )) ms after Firecracker start"; break; }
