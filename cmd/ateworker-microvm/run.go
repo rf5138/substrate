@@ -69,6 +69,9 @@ type runningActor struct {
 	vfsdProc *child.Process
 	// apiSocket is the CH api-socket for this ateworker-owned VMM.
 	apiSocket string
+	// fcRoot is the Firecracker chroot when the actor runs on Firecracker (chProc is
+	// then the firecracker process and vfsdProc is nil).
+	fcRoot string
 	// stopping is set once teardown starts, so watchVM can tell an expected
 	// exit from a crash: shutting the VM down makes cloud-hypervisor exit, and
 	// virtiofsd exits once its only client is gone.
@@ -379,6 +382,9 @@ func (s *AteWorkerService) coldBootActorRetrying(ctx context.Context, p actorBoo
 // containers, publishing the VM on the actor's hosted record. The caller holds
 // the actor's lifecycle lock and owns the lifecycle logging.
 func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams) (retErr error) {
+	if s.fcBinary != "" {
+		return s.coldBootFirecracker(ctx, p)
+	}
 	actorUID := p.actorUID
 
 	// All of the actor's containers share the one micro-VM (which is the pod

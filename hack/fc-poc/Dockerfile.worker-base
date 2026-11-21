@@ -1,0 +1,6 @@
+# Base image for ateworker-microvm on Firecracker: mkfs.ext4 to build the block
+# images, and the firecracker binary the worker chroots per actor.
+FROM debian:13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs && rm -rf /var/lib/apt/lists/*
+COPY firecracker /usr/local/bin/firecracker
+ENV ATE_MICROVM_FIRECRACKER=/usr/local/bin/firecracker

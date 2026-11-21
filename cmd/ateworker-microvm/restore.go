@@ -198,6 +198,12 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 
 	switch scope := req.GetFidelity(); scope {
 	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+		if s.fcBinary != "" {
+			if err := s.restoreFirecracker(ctx, p, scope, restoreDir, tStart); err != nil {
+				return nil, err
+			}
+			break
+		}
 		if err := s.restoreMemoryFidelity(ctx, p, scope, restoreDir, req.GetPreserveRestoreDir(), tStart); err != nil {
 			return nil, err
 		}

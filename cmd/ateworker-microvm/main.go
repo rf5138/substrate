@@ -390,6 +390,8 @@ type AteWorkerService struct {
 	podUID     string
 	chBinary   string
 	guestDebug bool
+	// fcBinary, when set, runs actors on Firecracker instead (see fcvm.go).
+	fcBinary string
 
 	// snapshotWrites holds a slot per CH snapshot write in flight, whose page
 	// cache memoryReservedBytes budgets for.
@@ -432,6 +434,7 @@ func NewService(podUID, chBinary string, guestDebug bool, maxActors int, tunnel 
 		podUID:         podUID,
 		chBinary:       chBinary,
 		guestDebug:     guestDebug,
+		fcBinary:       os.Getenv(fcEnvBinary),
 		snapshotWrites: make(chan struct{}, snapshotWriteSlots),
 		tunnel:         tunnel,
 		actorLogger:    actorLogger,

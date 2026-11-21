@@ -153,6 +153,12 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	// The actor's CH was booted by RunWorkload or relaunched by RestoreWorkload;
 	// either way ateworker owns it and tracks its api-socket.
 	ra := s.runningVM(actorUID)
+	if ra != nil && ra.fcRoot != "" {
+		var ph fcCheckpointPhases
+		resp, err := s.checkpointFirecracker(ctx, req, ra, hosted, &ph)
+		dPrep, dPause, dSnapshot, dUpper, dTeardown = time.Since(tStart)-ph.pause-ph.snapshot-ph.disks-ph.teardown, ph.pause, ph.snapshot, ph.disks, ph.teardown
+		return resp, err
+	}
 	chSocket := kata.CLHSocketPath(actorUID)
 	if ra != nil && ra.apiSocket != "" {
 		chSocket = ra.apiSocket

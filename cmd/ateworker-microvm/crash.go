@@ -42,10 +42,17 @@ var _ crashReporter = (*register.CrashReporter)(nil)
 // reach this worker for it again, and then reported crashed.
 func (s *AteWorkerService) watchVM(attribution resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs, ra *runningActor) {
 	what, exit := "cloud-hypervisor", ""
+	if ra.fcRoot != "" {
+		what = "firecracker"
+	}
+	var vfsdDone <-chan struct{} // nil blocks forever: Firecracker has no virtiofsd
+	if ra.vfsdProc != nil {
+		vfsdDone = ra.vfsdProc.Done()
+	}
 	select {
 	case <-ra.chProc.Done():
 		exit = ra.chProc.Exit()
-	case <-ra.vfsdProc.Done():
+	case <-vfsdDone:
 		what, exit = "virtiofsd", ra.vfsdProc.Exit()
 	}
 	if ra.stopping.Load() || s.shuttingDown.Load() {

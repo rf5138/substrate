@@ -37,7 +37,7 @@ import (
 // the defaults has to be made deliberately in both places.
 var (
 	gvisorWorkerCapabilities  = []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "CHOWN", "NET_RAW", "SETFCAP", "IPC_LOCK"}
-	microVMWorkerCapabilities = []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "CHOWN", "MKNOD", "SETFCAP", "FSETID", "SETPCAP"}
+	microVMWorkerCapabilities = []corev1.Capability{"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "CHOWN", "MKNOD", "SETFCAP", "FSETID", "SETPCAP", "SYS_CHROOT"}
 	// virtiofsd's default child set: what its serving child keeps in its
 	// permitted and effective sets after it drops the rest. With file handles
 	// off it does not add DAC_READ_SEARCH.
