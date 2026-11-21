@@ -32,7 +32,7 @@ agent.log=debug agent.debug_console agent.debug_console_vport=1026"
 cat > "$RUN/config.json" <<EOF
 {
   "boot-source": { "kernel_image_path": "$DIR/vmlinux", "boot_args": "$BOOT_ARGS" },
-  "machine-config": { "vcpu_count": 2, "mem_size_mib": 2048 },
+  "machine-config": { "vcpu_count": ${VCPUS:-2}, "mem_size_mib": ${MEM_MIB:-2048} },
   "drives": $DRIVES,
   "pmem": [ { "id": "rootfs", "path_on_host": "$DIR/rootfs.img", "root_device": false, "read_only": true } ],
   "vsock": { "guest_cid": 3, "uds_path": "$RUN/kata.hvsock" },
