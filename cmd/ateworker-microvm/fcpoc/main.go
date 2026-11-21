@@ -47,7 +47,8 @@ var defaultCaps = []string{
 
 func main() {
 	vsock := flag.String("vsock", "", "Firecracker hybrid-vsock socket (vsock.uds_path)")
-	dev := flag.String("dev", "/dev/vda", "guest block device holding the container rootfs")
+	dev := flag.String("dev", "/dev/vda", "guest block device holding the container rootfs (the read-only lower when -upper-dev is set)")
+	upperDev := flag.String("upper-dev", "", "guest block device for a per-actor writable layer; empty runs directly on -dev")
 	fstype := flag.String("fstype", "ext4", "rootfs filesystem type")
 	cid := flag.String("cid", "ctr0", "container id")
 	cmd := flag.String("cmd", "echo hello from firecracker; head -2 /etc/os-release; mount | grep ' / '; echo written > /probe && cat /probe", "shell command to run")
@@ -93,12 +94,7 @@ func main() {
 		ContainerId: *cid,
 		ExecId:      *cid,
 		OCI:         pbSpec,
-		Storages: []*agentpb.Storage{{
-			Driver:     "mmioblk",
-			Source:     *dev,
-			Fstype:     *fstype,
-			MountPoint: rootfs,
-		}},
+		Storages:    rootfsStorages(*cid, *dev, *upperDev, *fstype, rootfs),
 	}); err != nil {
 		log.Fatal(err)
 	}
@@ -162,6 +158,31 @@ func containerSpec(cmd string) *specs.Spec {
 		},
 		Linux: &specs.Linux{
 			Namespaces: []specs.LinuxNamespace{{Type: "pid"}, {Type: "ipc"}, {Type: "uts"}, {Type: "mount"}},
+		},
+	}
+}
+
+// rootfsStorages returns the agent storages that build the container rootfs, mounted
+// in order. With an upper device the guest assembles overlay(lower = the shared
+// read-only image, upper/work = the per-actor writable disk).
+func rootfsStorages(cid, lowerDev, upperDev, fstype, rootfs string) []*agentpb.Storage {
+	if upperDev == "" {
+		return []*agentpb.Storage{{Driver: "mmioblk", Source: lowerDev, Fstype: fstype, MountPoint: rootfs}}
+	}
+	base := fmt.Sprintf("/run/kata-containers/shared/containers/%s", cid)
+	lower, rw := base+"/lower", base+"/rw"
+	upper, work := rw+"/upper", rw+"/work"
+	const createDir = "io.katacontainers.volume.overlayfs.create_directory="
+	return []*agentpb.Storage{
+		{Driver: "mmioblk", Source: lowerDev, Fstype: fstype, Options: []string{"ro"}, MountPoint: lower},
+		{Driver: "mmioblk", Source: upperDev, Fstype: "ext4", MountPoint: rw},
+		{
+			Driver:        "overlayfs",
+			DriverOptions: []string{createDir + upper, createDir + work},
+			Source:        "overlay",
+			Fstype:        "overlay",
+			Options:       []string{"lowerdir=" + lower, "upperdir=" + upper, "workdir=" + work},
+			MountPoint:    rootfs,
 		},
 	}
 }

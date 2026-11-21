@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Boot the Kata guest under Firecracker on KVM and wait for kata-agent on vsock 1024.
 # Usage: boot-kata-guest.sh [vm-name] [container-rootfs-image]
+#        LOWER_IMAGE=<image> boot-kata-guest.sh [vm-name]   (shared read-only lower + per-VM upper)
 # Guest image is read-only virtio-pmem with DAX, as in Substrate's Cloud Hypervisor setup.
 # A container rootfs image, if given, is copied per VM and attached as virtio-blk (/dev/vda).
 set -euo pipefail
@@ -12,7 +13,12 @@ if [ -f "$RUN/fc.pid" ]; then kill "$(cat "$RUN/fc.pid")" 2>/dev/null || true; s
 rm -rf "$RUN" && mkdir -p "$RUN"
 
 DRIVES="[]"
-if [ -n "$CTR_IMAGE" ]; then
+if [ -n "${LOWER_IMAGE:-}" ]; then
+  # Shared read-only image (not copied) plus a fresh sparse per-VM writable disk.
+  truncate -s "${UPPER_SIZE:-1G}" "$RUN/upper.ext4" && mkfs.ext4 -q -F "$RUN/upper.ext4"
+  DRIVES="[ { \"drive_id\": \"lower\", \"path_on_host\": \"$LOWER_IMAGE\", \"is_root_device\": false, \"is_read_only\": true },
+            { \"drive_id\": \"upper\", \"path_on_host\": \"$RUN/upper.ext4\", \"is_root_device\": false, \"is_read_only\": false } ]"
+elif [ -n "$CTR_IMAGE" ]; then
   cp --sparse=always "$CTR_IMAGE" "$RUN/ctr0.ext4"
   DRIVES="[ { \"drive_id\": \"ctr0\", \"path_on_host\": \"$RUN/ctr0.ext4\", \"is_root_device\": false, \"is_read_only\": false } ]"
 fi
