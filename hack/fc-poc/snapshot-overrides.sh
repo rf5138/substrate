@@ -20,8 +20,9 @@ COUNTER='echo counter=$(cat /run/kata-containers/ctr0/rootfs/counter)'
 
 "$FC_BIN" --version | head -1
 echo "=== boot the source VM from $SRC, with its own copy of the guest image"
-mkdir -p "$SRC" && cp --sparse=always "$DIR/rootfs.img" "$SRC/guest.img"
-GUEST_IMAGE="$SRC/guest.img" "$HERE/boot-kata-guest.sh" vm-ovr-src "$DIR/alpine.ext4"
+SRC_IMG=$DIR/run/guest-ovr-src.img
+mkdir -p "$DIR/run" && cp --sparse=always "$DIR/rootfs.img" "$SRC_IMG"
+GUEST_IMAGE="$SRC_IMG" "$HERE/boot-kata-guest.sh" vm-ovr-src "$DIR/alpine.ext4"
 "$DIR/fcpoc" -vsock "$SRC/kata.hvsock" -detach \
   -cmd 'i=0; while true; do i=$((i+1)); echo $i > /counter; sleep 0.2; done'
 sleep 3
@@ -33,8 +34,8 @@ api "$SRC" PATCH /vm '{"state":"Paused"}'
 api "$SRC" PUT /snapshot/create "{\"snapshot_type\":\"Full\",\"snapshot_path\":\"$SNAP/vmstate\",\"mem_file_path\":\"$SNAP/mem\",\"sync_snapshot_files\":false}"
 cp --sparse=always "$SRC/ctr0.ext4" "$SNAP/ctr0.ext4"
 kill "$(cat "$SRC/fc.pid")"; sleep 0.5
-rm -rf "$SRC"
-echo "recorded paths gone: $(ls "$SRC" 2>&1 | head -1)"
+rm -rf "$SRC" "$SRC_IMG"
+echo "recorded paths gone: $(ls "$SRC" "$SRC_IMG" 2>&1 | head -2 | tr "\n" " ")"
 
 echo "=== restore from $DST with overrides"
 rm -rf "$DST" && mkdir -p "$DST"
