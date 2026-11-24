@@ -50,6 +50,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/ch"
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/child"
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/fc"
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/kata"
@@ -490,7 +491,7 @@ func (s *AteWorkerService) coldBootFirecracker(ctx context.Context, p actorBootP
 	defer leaf.Close()
 	cfg := &fc.Config{
 		BootSource:    fc.BootSource{KernelImagePath: fc.Kernel, BootArgs: s.fcBootArgs()},
-		MachineConfig: fc.MachineConfig{VcpuCount: vcpus, MemSizeMiB: memMiB},
+		MachineConfig: fc.MachineConfig{VcpuCount: vcpus, MemSizeMiB: memMiB, TrackDirtyPages: true},
 		Drives:        m.drives(),
 		Pmem:          []fc.Pmem{{ID: guestImagePmemID, PathOnHost: fc.GuestImage, ReadOnly: true}},
 		Vsock:         &fc.Vsock{GuestCID: 3, UDSPath: fc.VsockSocket},
@@ -559,7 +560,7 @@ func (s *AteWorkerService) fcActivate(ctx context.Context, p actorBootParams, ra
 }
 
 // restoreFirecracker restores a MEMORY snapshot taken by checkpointFirecracker.
-func (s *AteWorkerService) restoreFirecracker(ctx context.Context, p actorBootParams, scope ateworkerpb.SnapshotFidelity, restoreDir string, tStart time.Time) (retErr error) {
+func (s *AteWorkerService) restoreFirecracker(ctx context.Context, p actorBootParams, scope ateworkerpb.SnapshotFidelity, restoreDir string, preserveRestoreDir bool, tStart time.Time) (retErr error) {
 	actorUID := p.actorUID
 	b, err := os.ReadFile(filepath.Join(restoreDir, fcManifestFile))
 	if err != nil {
@@ -670,13 +671,14 @@ func (s *AteWorkerService) restoreFirecracker(ctx context.Context, p actorBootPa
 	}
 	ra := &runningActor{chProc: proc, apiSocket: filepath.Join(root, fc.APISocket[1:]), fcRoot: root,
 		memoryBytes: p.size.MemoryBytes, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs),
-		snapshotIsSelfContained: true}
+		// The next diff snapshot is merged onto this restore's memory file.
+		restoreSourceDir: restoreDir, preserveRestoreSource: preserveRestoreDir}
 	return s.fcActivate(ctx, p, ra, ac, ctrs)
 }
 
 // fcCheckpointPhases are what checkpointFirecracker measured.
 type fcCheckpointPhases struct {
-	pause, snapshot, disks, teardown time.Duration
+	pause, snapshot, merge, disks, teardown time.Duration
 }
 
 // checkpointFirecracker takes a MEMORY snapshot of a Firecracker actor into the
@@ -725,6 +727,21 @@ func (s *AteWorkerService) checkpointFirecracker(ctx context.Context, req *atewo
 	if err != nil {
 		return nil, fmt.Errorf("while creating snapshot: %w", err)
 	}
+	// A restored VM's diff holds only the pages written since the restore; lay it
+	// over the memory it was restored from so the snapshot is complete.
+	if ra.restoreSourceDir != "" {
+		t = time.Now()
+		base, delta := filepath.Join(ra.restoreSourceDir, fcMemFile), filepath.Join(checkpointDir, fcMemFile)
+		if ra.preserveRestoreSource {
+			err = ch.MergeSparseOverlay(ctx, base, delta, delta)
+		} else {
+			err = ch.MergeDeltaIntoBase(ctx, base, delta)
+		}
+		ph.merge = time.Since(t)
+		if err != nil {
+			return nil, fmt.Errorf("while merging the diff snapshot onto its base: %w", err)
+		}
+	}
 	// Firecracker drained and fsynced the disks while creating the snapshot.
 	t = time.Now()
 	for _, name := range m.disks() {
@@ -740,6 +757,7 @@ func (s *AteWorkerService) checkpointFirecracker(ctx context.Context, req *atewo
 	if err != nil {
 		return nil, err
 	}
+	logSnapshotSizes(ctx, actorUID, checkpointDir, files)
 	t = time.Now()
 	if err := s.terminateWorkload(ctx, attribution, actorDirs); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint", slog.String("actorUID", actorUID), slog.Any("err", err))
@@ -760,4 +778,16 @@ func mustJSON(v any) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// logSnapshotSizes logs each snapshot file's logical and allocated size.
+func logSnapshotSizes(ctx context.Context, actorUID, dir string, files []string) {
+	attrs := []any{slog.String("id", actorUID)}
+	for _, f := range files {
+		var st unix.Stat_t
+		if unix.Stat(filepath.Join(dir, f), &st) == nil {
+			attrs = append(attrs, slog.String(f, fmt.Sprintf("%d/%d MiB", st.Blocks*512>>20, st.Size>>20)))
+		}
+	}
+	slog.InfoContext(ctx, "Firecracker snapshot sizes (allocated/logical)", attrs...)
 }

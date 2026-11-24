@@ -156,7 +156,7 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	if ra != nil && ra.fcRoot != "" {
 		var ph fcCheckpointPhases
 		resp, err := s.checkpointFirecracker(ctx, req, ra, hosted, &ph)
-		dPrep, dPause, dSnapshot, dUpper, dTeardown = time.Since(tStart)-ph.pause-ph.snapshot-ph.disks-ph.teardown, ph.pause, ph.snapshot, ph.disks, ph.teardown
+		dPrep, dPause, dSnapshot, dUpper, dTeardown = time.Since(tStart)-ph.pause-ph.snapshot-ph.merge-ph.disks-ph.teardown, ph.pause, ph.snapshot+ph.merge, ph.disks, ph.teardown
 		return resp, err
 	}
 	chSocket := kata.CLHSocketPath(actorUID)

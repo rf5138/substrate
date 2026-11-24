@@ -66,8 +66,9 @@ type BootSource struct {
 }
 
 type MachineConfig struct {
-	VcpuCount  int `json:"vcpu_count"`
-	MemSizeMiB int `json:"mem_size_mib"`
+	VcpuCount       int  `json:"vcpu_count"`
+	MemSizeMiB      int  `json:"mem_size_mib"`
+	TrackDirtyPages bool `json:"track_dirty_pages,omitempty"`
 }
 
 type Drive struct {
@@ -218,10 +219,12 @@ func (c *Client) setState(ctx context.Context, state string) error {
 func (c *Client) Pause(ctx context.Context) error  { return c.setState(ctx, "Paused") }
 func (c *Client) Resume(ctx context.Context) error { return c.setState(ctx, "Resumed") }
 
-// SnapshotCreate writes a full snapshot of the paused VM to chroot-relative paths.
+// SnapshotCreate writes a diff snapshot of the paused VM to chroot-relative paths:
+// a sparse memory file holding only the pages written since boot or the last
+// restore (dirty-page tracking must be on).
 func (c *Client) SnapshotCreate(ctx context.Context, statePath, memPath string) error {
 	return c.do(ctx, http.MethodPut, "/snapshot/create", map[string]any{
-		"snapshot_type":       "Full",
+		"snapshot_type":       "Diff",
 		"snapshot_path":       statePath,
 		"mem_file_path":       memPath,
 		"sync_snapshot_files": false,
@@ -232,9 +235,10 @@ func (c *Client) SnapshotCreate(ctx context.Context, statePath, memPath string) 
 // a private mapping of memPath, so it loads lazily as the guest touches it.
 func (c *Client) SnapshotLoad(ctx context.Context, statePath, memPath string) error {
 	return c.do(ctx, http.MethodPut, "/snapshot/load", map[string]any{
-		"snapshot_path":  statePath,
-		"mem_backend":    map[string]string{"backend_type": "File", "backend_path": memPath},
-		"clock_realtime": true,
-		"resume_vm":      true,
+		"snapshot_path":     statePath,
+		"mem_backend":       map[string]string{"backend_type": "File", "backend_path": memPath},
+		"clock_realtime":    true,
+		"track_dirty_pages": true,
+		"resume_vm":         true,
 	})
 }
