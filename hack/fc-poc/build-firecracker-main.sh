@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Build Firecracker from main (which has drive_overrides and pmem_overrides) with its
-# own container-based build tool, and install it as /opt/fc-poc/firecracker-main.
+# Build Firecracker from source (by default the v1.18.0 backport of drive_overrides and
+# pmem_overrides) with its own container-based build tool, and install it as
+# /opt/fc-poc/firecracker-main.
 set -euo pipefail
 DIR=/opt/fc-poc
-REF=${FC_REF:-main}
+REPO=${FC_REPO:-https://github.com/rf5138/firecracker.git}
+REF=${FC_REF:-v1.18.0-snapshot-overrides}
 systemctl start docker
 rm -rf "$DIR/firecracker-src"
-git clone -q --depth 1 -b "$REF" https://github.com/firecracker-microvm/firecracker.git "$DIR/firecracker-src"
+git clone -q --depth 1 -b "$REF" "$REPO" "$DIR/firecracker-src"
 cd "$DIR/firecracker-src"
 echo "building firecracker $(git log -1 --format='%h (%cd)')"
 tools/devtool -y build --release
