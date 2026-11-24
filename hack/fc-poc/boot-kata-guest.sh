@@ -34,7 +34,7 @@ cat > "$RUN/config.json" <<EOF
   "boot-source": { "kernel_image_path": "$DIR/vmlinux", "boot_args": "$BOOT_ARGS" },
   "machine-config": { "vcpu_count": ${VCPUS:-2}, "mem_size_mib": ${MEM_MIB:-2048} },
   "drives": $DRIVES,
-  "pmem": [ { "id": "rootfs", "path_on_host": "$DIR/rootfs.img", "root_device": false, "read_only": true } ],
+  "pmem": [ { "id": "rootfs", "path_on_host": "${GUEST_IMAGE:-$DIR/rootfs.img}", "root_device": false, "read_only": true } ],
   "vsock": { "guest_cid": 3, "uds_path": "$RUN/kata.hvsock" },
   "entropy": {},
   "logger": { "log_path": "$RUN/fc.log", "level": "Info" }
@@ -43,7 +43,7 @@ EOF
 touch "$RUN/fc.log"
 
 T0=$(date +%s.%N)
-"$DIR/firecracker" --api-sock "$RUN/api.sock" --config-file "$RUN/config.json" > "$RUN/console.log" 2>&1 &
+"${FC_BIN:-$DIR/firecracker}" --api-sock "$RUN/api.sock" --config-file "$RUN/config.json" > "$RUN/console.log" 2>&1 &
 echo $! > "$RUN/fc.pid"
 
 for i in $(seq 1 300); do
