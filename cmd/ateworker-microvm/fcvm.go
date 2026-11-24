@@ -26,8 +26,10 @@ package main
 //     actor gets one writable disk for every container's overlay upper, and the
 //     durable-dir volumes become one more disk. kata-agent mounts the disks and
 //     builds the overlays in the guest.
-//   - Firecracker runs chrooted into a per-actor directory with fixed paths inside,
-//     so a snapshot restores into any actor without drive_overrides.
+//   - Each actor's files live in its own directory and Firecracker gets their real
+//     paths. A snapshot restores into another actor by passing that actor's paths
+//     as snapshot overrides (drive_overrides and pmem_overrides need Firecracker
+//     with upstream #6402, or the 1.18 backport).
 //   - Firecracker opens the tap by name, so it runs in the actor's network namespace.
 //
 // Only MEMORY snapshots are supported. A snapshot ships the VM state, guest memory
@@ -92,7 +94,7 @@ type fcManifest struct {
 
 func fcLowerDisk(i int) string { return fmt.Sprintf("lower-%d.ext4", i) }
 
-// fcDisks lists the chroot disk files in drive order: lowers, upper, durable.
+// disks lists the actor's disk files in drive order: lowers, upper, durable.
 func (m fcManifest) disks() []string {
 	var d []string
 	for i := range m.Containers {
@@ -105,10 +107,12 @@ func (m fcManifest) disks() []string {
 	return d
 }
 
-func (m fcManifest) drives() []fc.Drive {
+func fcDriveID(i int) string { return fmt.Sprintf("d%d", i) }
+
+func (m fcManifest) drives(dir string) []fc.Drive {
 	var out []fc.Drive
 	for i, name := range m.disks() {
-		out = append(out, fc.Drive{DriveID: fmt.Sprintf("d%d", i), PathOnHost: "/" + name, IsReadOnly: i < len(m.Containers)})
+		out = append(out, fc.Drive{DriveID: fcDriveID(i), PathOnHost: filepath.Join(dir, name), IsReadOnly: i < len(m.Containers)})
 	}
 	return out
 }
@@ -143,62 +147,9 @@ func (m fcManifest) guestStorages() []*agentpb.Storage {
 	return st
 }
 
+// fcRoot is the actor's Firecracker directory: disks, sockets and config. CleanupSandboxState
+// removes it with the rest of VMDir.
 func fcRoot(actorUID string) string { return filepath.Join(kata.VMDir(actorUID), "fc") }
-
-// fcPrepareRoot lays out the chroot: the firecracker binary, kernel and guest image
-// bound read-only, and /dev/kvm and /dev/net/tun bound in. CleanupSandboxState
-// unmounts and removes it with the rest of VMDir.
-func (s *AteWorkerService) fcPrepareRoot(root, kernel, image string) error {
-	if err := os.MkdirAll(filepath.Join(root, "dev", "net"), 0o700); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(root, fc.SnapDir[1:]), 0o700); err != nil {
-		return err
-	}
-	for _, b := range []struct {
-		src, dst string
-		ro       bool
-	}{
-		{s.fcBinary, fc.Binary, true},
-		{kernel, fc.Kernel, true},
-		{image, fc.GuestImage, true},
-		{"/dev/kvm", "/dev/kvm", false},
-		{"/dev/net/tun", "/dev/net/tun", false},
-	} {
-		if err := bindFile(b.src, filepath.Join(root, b.dst[1:]), b.ro); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func bindFile(src, dst string, ro bool) error {
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_RDONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	_ = f.Close()
-	if err := unix.Mount(src, dst, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("bind %q -> %q: %w", src, dst, err)
-	}
-	if ro {
-		if err := unix.Mount("", dst, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
-			return fmt.Errorf("remount %q read-only: %w", dst, err)
-		}
-	}
-	return nil
-}
-
-func bindDir(src, dst string) error {
-	_ = unix.Unmount(dst, unix.MNT_DETACH)
-	if err := os.MkdirAll(dst, 0o700); err != nil {
-		return err
-	}
-	if err := unix.Mount(src, dst, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("bind %q -> %q: %w", src, dst, err)
-	}
-	return nil
-}
 
 // mkfsExt4 creates a sparse ext4 image of size bytes, populated from srcDir if set.
 func mkfsExt4(ctx context.Context, image string, size int64, srcDir string, journal bool) error {
@@ -300,7 +251,8 @@ func copySparse(src, dst string) error {
 func (s *AteWorkerService) fcLaunch(ctx context.Context, actorUID, root string, cfg *fc.Config, leaf *cgroup.ActorLeaf) (*child.Process, *fc.Client, error) {
 	nsHandle := s.sandboxNetNS(actorUID)
 	return fc.Launch(ctx, fc.LaunchOptions{
-		Root:        root,
+		Binary:      s.fcBinary,
+		Dir:         root,
 		Config:      cfg,
 		SysProcAttr: leaf.SysProcAttr(),
 		Stdout:      slogWriter{ctx},
@@ -450,9 +402,6 @@ func (s *AteWorkerService) coldBootFirecracker(ctx context.Context, p actorBootP
 	if err := checkResourceEnvelope(ctrs, guestEnvelope{memMiB: memMiB, vcpus: vcpus}); err != nil {
 		return err
 	}
-	if err := s.fcPrepareRoot(root, kernel, image); err != nil {
-		return err
-	}
 	tPrep := time.Now()
 
 	m := fcManifest{Durable: hasDurableVolumes(p.containers), VCPUs: vcpus, MemMiB: memMiB}
@@ -490,11 +439,11 @@ func (s *AteWorkerService) coldBootFirecracker(ctx context.Context, p actorBootP
 	}
 	defer leaf.Close()
 	cfg := &fc.Config{
-		BootSource:    fc.BootSource{KernelImagePath: fc.Kernel, BootArgs: s.fcBootArgs()},
+		BootSource:    fc.BootSource{KernelImagePath: kernel, BootArgs: s.fcBootArgs()},
 		MachineConfig: fc.MachineConfig{VcpuCount: vcpus, MemSizeMiB: memMiB, TrackDirtyPages: true},
-		Drives:        m.drives(),
-		Pmem:          []fc.Pmem{{ID: guestImagePmemID, PathOnHost: fc.GuestImage, ReadOnly: true}},
-		Vsock:         &fc.Vsock{GuestCID: 3, UDSPath: fc.VsockSocket},
+		Drives:        m.drives(root),
+		Pmem:          []fc.Pmem{{ID: guestImagePmemID, PathOnHost: image, ReadOnly: true}},
+		Vsock:         &fc.Vsock{GuestCID: 3, UDSPath: filepath.Join(root, fc.VsockSocket)},
 		Network:       []fc.NetInterface{{IfaceID: actornet.ActorVethName, HostDevName: fcTapName, GuestMAC: actorGuestMAC}},
 		Entropy:       &struct{}{},
 	}
@@ -512,7 +461,7 @@ func (s *AteWorkerService) coldBootFirecracker(ctx context.Context, p actorBootP
 		return err
 	}
 
-	vsock := filepath.Join(root, fc.VsockSocket[1:])
+	vsock := filepath.Join(root, fc.VsockSocket)
 	ac, err := s.fcStartGuest(ctx, actorUID, vsock, m, ctrs)
 	if err != nil {
 		return err
@@ -534,7 +483,7 @@ func (s *AteWorkerService) coldBootFirecracker(ctx context.Context, p actorBootP
 		slog.Duration("wakeup_probe", time.Since(tContainers)),
 		slog.Duration("total", time.Since(tStart)))
 
-	ra := &runningActor{chProc: proc, apiSocket: filepath.Join(root, fc.APISocket[1:]), fcRoot: root,
+	ra := &runningActor{chProc: proc, apiSocket: filepath.Join(root, fc.APISocket), fcRoot: root,
 		memoryBytes: p.size.MemoryBytes, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs)}
 	return s.fcActivate(ctx, p, ra, ac, ctrs)
 }
@@ -570,7 +519,10 @@ func (s *AteWorkerService) restoreFirecracker(ctx context.Context, p actorBootPa
 	if err := json.Unmarshal(b, &m); err != nil {
 		return fmt.Errorf("while reading %s: %w", fcManifestFile, err)
 	}
-	kernel, image := p.assetPaths[assetKernel], p.assetPaths[assetImage]
+	image := p.assetPaths[assetImage]
+	if image == "" {
+		return fmt.Errorf("ateworker-microvm requires the %q asset path", assetImage)
+	}
 	egress, err := s.tunnel.PrepareEgress(ctx, p.attribution(), p.egressGateway)
 	if err != nil {
 		return err
@@ -588,25 +540,26 @@ func (s *AteWorkerService) restoreFirecracker(ctx context.Context, p actorBootPa
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return err
 	}
-	if err := s.fcPrepareRoot(root, kernel, image); err != nil {
-		return err
-	}
-	if err := bindDir(restoreDir, filepath.Join(root, fc.SnapDir[1:])); err != nil {
-		return err
-	}
 	tPrep := time.Now()
-	// Images are read-only: bind them. The writable disks are copied, so the
+	// The snapshot recorded the snapshotting actor's paths; point every device at
+	// this actor's files instead. Images are read-only, so they are used in place
+	// (linked into this actor's directory); writable disks are copied so the
 	// snapshot stays reusable.
+	ov := fc.Overrides{
+		Pmem:  []fc.PmemOverride{{ID: guestImagePmemID, PathOnHost: image}},
+		Vsock: &fc.VsockOverride{UDSPath: filepath.Join(root, fc.VsockSocket)},
+	}
 	for i, name := range m.disks() {
 		src, dst := filepath.Join(restoreDir, name), filepath.Join(root, name)
 		if i < len(m.Containers) {
-			err = bindFile(src, dst, true)
+			err = os.Symlink(src, dst)
 		} else {
 			err = copySparse(src, dst)
 		}
 		if err != nil {
 			return fmt.Errorf("while staging %s: %w", name, err)
 		}
+		ov.Drives = append(ov.Drives, fc.DriveOverride{DriveID: fcDriveID(i), PathOnHost: dst})
 	}
 	tDisks := time.Now()
 	if err := s.fcTap(ctx, actorUID); err != nil {
@@ -628,14 +581,14 @@ func (s *AteWorkerService) restoreFirecracker(ctx context.Context, p actorBootPa
 		}
 	}()
 	tLaunch := time.Now()
-	if err := client.SnapshotLoad(ctx, path.Join(fc.SnapDir, fcStateFile), path.Join(fc.SnapDir, fcMemFile)); err != nil {
+	if err := client.SnapshotLoad(ctx, filepath.Join(restoreDir, fcStateFile), filepath.Join(restoreDir, fcMemFile), ov); err != nil {
 		return fmt.Errorf("while loading snapshot: %w", err)
 	}
 	tVMRestore := time.Now()
 	if err := os.WriteFile(filepath.Join(root, fcManifestFile), b, 0o600); err != nil {
 		return err
 	}
-	ac, err := dialAgentRetry(ctx, filepath.Join(root, fc.VsockSocket[1:]), 15*time.Second)
+	ac, err := dialAgentRetry(ctx, filepath.Join(root, fc.VsockSocket), 15*time.Second)
 	if err != nil {
 		return restoreGuestReadyError(ctx, "dialing kata-agent after restore", err)
 	}
@@ -669,7 +622,7 @@ func (s *AteWorkerService) restoreFirecracker(ctx context.Context, p actorBootPa
 	for i, c := range p.containers {
 		ctrs[i] = actorContainer{name: c.GetName(), id: ocispec.GuestContainerID(c.GetName())}
 	}
-	ra := &runningActor{chProc: proc, apiSocket: filepath.Join(root, fc.APISocket[1:]), fcRoot: root,
+	ra := &runningActor{chProc: proc, apiSocket: filepath.Join(root, fc.APISocket), fcRoot: root,
 		memoryBytes: p.size.MemoryBytes, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs),
 		// The next diff snapshot is merged onto this restore's memory file.
 		restoreSourceDir: restoreDir, preserveRestoreSource: preserveRestoreDir}
@@ -716,14 +669,9 @@ func (s *AteWorkerService) checkpointFirecracker(ctx context.Context, req *atewo
 	if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
 		return nil, err
 	}
-	snap := filepath.Join(ra.fcRoot, fc.SnapDir[1:])
-	if err := bindDir(checkpointDir, snap); err != nil {
-		return nil, err
-	}
 	t = time.Now()
-	err = client.SnapshotCreate(ctx, path.Join(fc.SnapDir, fcStateFile), path.Join(fc.SnapDir, fcMemFile))
+	err = client.SnapshotCreate(ctx, filepath.Join(checkpointDir, fcStateFile), filepath.Join(checkpointDir, fcMemFile))
 	ph.snapshot = time.Since(t)
-	_ = unix.Unmount(snap, unix.MNT_DETACH)
 	if err != nil {
 		return nil, fmt.Errorf("while creating snapshot: %w", err)
 	}

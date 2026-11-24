@@ -422,8 +422,6 @@ var workerGvisorCapabilities = []corev1.Capability{
 var workerMicroVMCapabilities = []corev1.Capability{
 	"NET_ADMIN", "SYS_ADMIN", "SETUID", "SETGID", "DAC_OVERRIDE",
 	"FOWNER", "CHOWN", "MKNOD", "SETFCAP", "FSETID", "SETPCAP",
-	// The Firecracker PoC chroots each VMM into its actor's directory.
-	"SYS_CHROOT",
 }
 
 // workerSecurityContext returns the worker container security context for a sandbox

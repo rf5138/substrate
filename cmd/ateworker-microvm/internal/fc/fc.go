@@ -16,10 +16,10 @@
 
 // Package fc drives a Firecracker VMM over its API socket.
 //
-// Firecracker runs chrooted into a per-actor directory, so every path it is
-// given (and every path a snapshot records) is chroot-relative and the same
-// for every actor. That is what lets one snapshot restore into any actor on
-// any worker without Firecracker's (unreleased) drive_overrides.
+// Each actor's files live in its own directory and Firecracker is given their
+// real host paths. A snapshot records those paths, so restoring it into another
+// actor passes that actor's paths as overrides (drive_overrides and
+// pmem_overrides need Firecracker built with #6402, or the 1.18 backport).
 package fc
 
 import (
@@ -39,14 +39,10 @@ import (
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/child"
 )
 
-// Paths inside the chroot. Constant across actors; see the package comment.
+// File names inside an actor's directory.
 const (
-	APISocket   = "/api.sock"
-	VsockSocket = "/v.sock"
-	Kernel      = "/vmlinux"
-	GuestImage  = "/guest.img"
-	SnapDir     = "/snap"
-	Binary      = "/firecracker"
+	APISocket   = "api.sock"
+	VsockSocket = "v.sock"
 )
 
 // Config is Firecracker's --config-file document.
@@ -96,13 +92,14 @@ type NetInterface struct {
 	GuestMAC    string `json:"guest_mac"`
 }
 
-// LaunchOptions starts a Firecracker process chrooted into Root.
+// LaunchOptions starts a Firecracker process for one actor.
 type LaunchOptions struct {
-	// Root is the host path of the chroot. It must already hold Binary, and
-	// whatever else the VM is configured with.
-	Root string
-	// Config, if set, is written into the chroot and passed as --config-file,
-	// which configures and boots the VM. Nil starts a bare VMM (for restore).
+	// Binary is the firecracker executable.
+	Binary string
+	// Dir is the actor's directory; the API socket is created in it.
+	Dir string
+	// Config, if set, is written into Dir and passed as --config-file, which
+	// configures and boots the VM. Nil starts a bare VMM (for restore).
 	Config *Config
 	// Start runs cmd.Start; the caller uses it to start the process in the
 	// actor's network namespace, where the tap lives.
@@ -114,29 +111,26 @@ type LaunchOptions struct {
 
 // Launch starts Firecracker and waits for its API socket.
 func Launch(ctx context.Context, o LaunchOptions) (*child.Process, *Client, error) {
-	args := []string{"--api-sock", APISocket}
+	sock := filepath.Join(o.Dir, APISocket)
+	args := []string{"--api-sock", sock}
 	if o.Config != nil {
 		b, err := json.Marshal(o.Config)
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := os.WriteFile(filepath.Join(o.Root, "config.json"), b, 0o600); err != nil {
+		cfg := filepath.Join(o.Dir, "config.json")
+		if err := os.WriteFile(cfg, b, 0o600); err != nil {
 			return nil, nil, err
 		}
-		args = append(args, "--config-file", "/config.json")
+		args = append(args, "--config-file", cfg)
 	}
-	_ = os.Remove(filepath.Join(o.Root, APISocket))
+	_ = os.Remove(sock)
 	// Not CommandContext: the VMM outlives the RPC that launched it.
-	cmd := exec.Command(Binary, args...)
-	cmd.Dir = "/"
+	cmd := exec.Command(o.Binary, args...)
+	cmd.Dir = o.Dir
 	cmd.Stdout = o.Stdout
 	cmd.Stderr = o.Stderr
-	attr := &syscall.SysProcAttr{}
-	if o.SysProcAttr != nil {
-		*attr = *o.SysProcAttr
-	}
-	attr.Chroot = o.Root
-	cmd.SysProcAttr = attr
+	cmd.SysProcAttr = o.SysProcAttr
 	start := o.Start
 	if start == nil {
 		start = child.Start
@@ -145,7 +139,7 @@ func Launch(ctx context.Context, o LaunchOptions) (*child.Process, *Client, erro
 	if err != nil {
 		return nil, nil, fmt.Errorf("while starting firecracker: %w", err)
 	}
-	c := NewClient(filepath.Join(o.Root, APISocket))
+	c := NewClient(sock)
 	if err := c.WaitReady(ctx, 15*time.Second); err != nil {
 		proc.Stop()
 		return nil, nil, err
@@ -219,7 +213,7 @@ func (c *Client) setState(ctx context.Context, state string) error {
 func (c *Client) Pause(ctx context.Context) error  { return c.setState(ctx, "Paused") }
 func (c *Client) Resume(ctx context.Context) error { return c.setState(ctx, "Resumed") }
 
-// SnapshotCreate writes a diff snapshot of the paused VM to chroot-relative paths:
+// SnapshotCreate writes a diff snapshot of the paused VM to the given paths:
 // a sparse memory file holding only the pages written since boot or the last
 // restore (dirty-page tracking must be on).
 func (c *Client) SnapshotCreate(ctx context.Context, statePath, memPath string) error {
@@ -231,14 +225,45 @@ func (c *Client) SnapshotCreate(ctx context.Context, statePath, memPath string) 
 	})
 }
 
+// Overrides point a snapshot's devices at this actor's files on restore.
+type Overrides struct {
+	Drives []DriveOverride `json:"drive_overrides,omitempty"`
+	Pmem   []PmemOverride  `json:"pmem_overrides,omitempty"`
+	Vsock  *VsockOverride  `json:"vsock_override,omitempty"`
+}
+
+type DriveOverride struct {
+	DriveID    string `json:"drive_id"`
+	PathOnHost string `json:"path_on_host"`
+}
+
+type PmemOverride struct {
+	ID         string `json:"id"`
+	PathOnHost string `json:"path_on_host"`
+}
+
+type VsockOverride struct {
+	UDSPath string `json:"uds_path"`
+}
+
 // SnapshotLoad restores a snapshot into a bare VMM and resumes it. Guest memory is
 // a private mapping of memPath, so it loads lazily as the guest touches it.
-func (c *Client) SnapshotLoad(ctx context.Context, statePath, memPath string) error {
-	return c.do(ctx, http.MethodPut, "/snapshot/load", map[string]any{
+func (c *Client) SnapshotLoad(ctx context.Context, statePath, memPath string, ov Overrides) error {
+	body := map[string]any{
 		"snapshot_path":     statePath,
 		"mem_backend":       map[string]string{"backend_type": "File", "backend_path": memPath},
 		"clock_realtime":    true,
 		"track_dirty_pages": true,
 		"resume_vm":         true,
-	})
+	}
+	if len(ov.Drives) > 0 {
+		body["drive_overrides"] = ov.Drives
+	}
+	if len(ov.Pmem) > 0 {
+		body["pmem_overrides"] = ov.Pmem
+	}
+	if ov.Vsock != nil {
+		body["vsock_override"] = ov.Vsock
+	}
+	return c.do(ctx, http.MethodPut, "/snapshot/load", body)
 }

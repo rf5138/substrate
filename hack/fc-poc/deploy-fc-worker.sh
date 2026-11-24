@@ -11,7 +11,8 @@ cd "$REPO"
 
 ctx=$(mktemp -d)
 cp hack/fc-poc/Dockerfile.worker-base "$ctx/Dockerfile"
-cp /opt/fc-poc/firecracker "$ctx/firecracker"
+# The 1.18 backport of snapshot overrides (hack/fc-poc/build-firecracker-main.sh).
+cp "${FC_BIN:-/opt/fc-poc/firecracker-main}" "$ctx/firecracker"
 docker build -q -t "$BASE" "$ctx" && docker push -q "$BASE"
 rm -rf "$ctx"
 
