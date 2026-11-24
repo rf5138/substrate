@@ -30,5 +30,5 @@ kubectl ate get actor-templates -a ate-demo-counter-microvm
 echo "=== Firecracker phases from the workers"
 for pod in $(kubectl get pods -n ate-demo-counter-microvm -o name); do
   kubectl logs -n ate-demo-counter-microvm "$pod" --all-containers 2>/dev/null \
-    | grep -E "Firecracker boot phases|Checkpoint timing breakdown|level\":\"ERROR" | tail -n 4
+    | grep -E "Firecracker boot phases|Checkpoint timing breakdown|level\":\"ERROR" | tail -n 4 || true
 done
